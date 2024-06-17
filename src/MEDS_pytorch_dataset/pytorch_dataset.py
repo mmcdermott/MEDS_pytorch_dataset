@@ -1,8 +1,8 @@
 import json
-from pathlib import Path
 from collections import defaultdict
-from enum import StrEnum
 from datetime import timedelta
+from enum import StrEnum
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -398,7 +398,9 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         )
 
         if stats["min"].item() <= timedelta(0):
-            bad_inter_event_times = data_for_stats.filter(pl.col("timestamp").list.diff().list.min() <= 0).collect()
+            bad_inter_event_times = data_for_stats.filter(
+                pl.col("timestamp").list.diff().list.min() <= 0
+            ).collect()
             bad_patient_ids = set(bad_inter_event_times["patient_id"].to_list())
             warning_strs = [
                 f"Observed inter-event times <= 0 for {len(bad_inter_event_times)} subjects!",
