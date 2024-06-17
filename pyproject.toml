@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pre-commit"]
+dev = ["pre-commit","notebook"]
 tests = ["pytest", "pytest-cov[toml]"]
 
 [project.urls]

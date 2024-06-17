@@ -180,18 +180,6 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
     def __init__(self, cfg: DictConfig, split: str):
         super().__init__()
 
-        if cfg.subsequence_sampling_strategy not in SubsequenceSamplingStrategy:
-            raise ValueError(
-                f"Invalid subsequence sampling strategy {cfg.subsequence_sampling_strategy}! "
-                f"Valid options are {', '.join(SubsequenceSamplingStrategy.__members__)}"
-            )
-
-        if cfg.seq_padding_side not in SeqPaddingSide:
-            raise ValueError(
-                f"Invalid sequence padding side {cfg.seq_padding_side}! "
-                f"Valid options are {', '.join(SeqPaddingSide.__members__)}"
-            )
-
         self.config = cfg
         self.split = split
 
