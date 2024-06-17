@@ -512,7 +512,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
             out["end_idx"] = end
 
         out["dynamic"] = JointNestedRaggedTensorDict.load_slice(
-            self.config.tensorized_root / f"{shard}.pt", patient_idx
+            self.config.tensorized_root / f"{shard}.nrt", patient_idx
         )[st:end]
 
         if self.config.do_include_start_time_min:
