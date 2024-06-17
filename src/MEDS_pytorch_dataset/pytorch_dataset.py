@@ -448,9 +448,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
             'time_delta': [seq_len],
             'dynamic_indices': [seq_len, n_data_per_event] (ragged),
             'dynamic_values': [seq_len, n_data_per_event] (ragged),
-            'dynamic_measurement_indices': [seq_len, n_data_per_event] (ragged),
             'static_indices': [seq_len, n_data_per_event] (ragged),
-            'static_measurement_indices': [seq_len, n_data_per_event] (ragged),
         }
         ``
 
@@ -460,12 +458,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         3. ``dynamic_values`` captures the numerical metadata elements listed in `self.data_cols`. If no
            numerical elements are listed in `self.data_cols` for a given categorical column, the according
            index in this output will be `np.NaN`.
-        4. ``dynamic_measurement_indices`` captures which measurement vocabulary was used to source a given
-           data element.
         5. ``static_indices`` captures the categorical metadata elements listed in `self.static_cols` in a
            unified vocabulary.
-        6. ``static_measurement_indices`` captures which measurement vocabulary was used to source a given
-           data element.
         """
         return self._seeded_getitem(idx)
 
@@ -483,8 +477,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         static_row = self.static_dfs[shard][patient_idx].to_dict()
 
         out = {
-            "static_indices": static_row["static_indices"].item().to_list(),
-            "static_measurement_indices": static_row["static_measurement_indices"].item().to_list(),
+            "static_indices": static_row["code"].item().to_list(),
+            "static_values": static_row["numerical_value"].item().to_list(),
         }
 
         if self.config.do_include_patient_id:
@@ -528,7 +522,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
     def __dynamic_only_collate(self, batch: list[dict[str, list[float]]]) -> dict:
         """An internal collate function for only dynamic data."""
         keys = batch[0].keys()
-        dense_keys = {k for k in keys if k not in ("dynamic", "static_indices", "static_measurement_indices")}
+        dense_keys = {k for k in keys if k not in ("dynamic", "static_indices", "static_values")}
 
         if dense_keys:
             dense_collated = torch.utils.data.default_collate([{k: x[k] for k in dense_keys} for x in batch])
@@ -558,9 +552,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         out_batch["event_mask"] = collated["event_mask"]
         out_batch["dynamic_values_mask"] = collated["dynamic_values_mask"]
         out_batch["time_delta"] = torch.nan_to_num(collated["time_delta"].float(), nan=0)
-        out_batch["dynamic_indices"] = collated["dynamic_indices"].long()
-        out_batch["dynamic_measurement_indices"] = collated["dynamic_measurement_indices"].long()
-        out_batch["dynamic_values"] = torch.nan_to_num(collated["dynamic_values"].float(), nan=0)
+        out_batch["dynamic_indices"] = collated["code"].long()
+        out_batch["dynamic_values"] = torch.nan_to_num(collated["numerical_values"].float(), nan=0)
 
         if self.config.do_include_start_time_min:
             out_batch["start_time"] = collated["start_time"].float()
@@ -608,7 +601,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         for e in batch:
             n_static = len(e["static_indices"])
             static_delta = max_n_static - n_static
-            for k in ("static_indices", "static_measurement_indices"):
+            for k in ("static_indices", "static_values"):
                 if static_delta > 0:
                     static_padded_fields[k].append(
                         torch.nn.functional.pad(
