@@ -1,6 +1,8 @@
 import json
+from pathlib import Path
 from collections import defaultdict
 from enum import StrEnum
+from datetime import timedelta
 
 import numpy as np
 import polars as pl
@@ -204,8 +206,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
 
     def read_shards(self):
         """Reads the split-specific patient shards from the ESGPT or MEDS dataset."""
-        shards_fp = self.config.split_shards_fp
-        all_shards = json.loads(shards_fp.read_text())
+        all_shards = json.loads(Path(self.config.split_shards_fp).read_text())
         self.shards = {sp: subjs for sp, subjs in all_shards.items() if sp.startswith(f"{self.split}/")}
         self.subj_map = {subj: sp for sp, subjs in self.shards.items() for subj in subjs}
 
@@ -216,18 +217,24 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         self.subj_seq_bounds = {}
 
         for shard in self.shards.keys():
-            static_fp = self.config.schema_files_root / f"{shard}.parquet"
-            df = pl.read_parquet(
-                static_fp,
-                columns=[
-                    "patient_id",
-                    "start_time",
-                    pl.col("code").alias("static_indices"),
-                    pl.col("numerical_value").alias("static_values"),
-                    "timestamp",
-                    "patient_offset",
-                ],
-                use_pyarrow=True,
+            static_fp = Path(self.config.schema_files_root) / f"{shard}.parquet"
+            df = (
+                pl.read_parquet(
+                    static_fp,
+                    columns=[
+                        "patient_id",
+                        "start_time",
+                        "code",
+                        "numerical_value",
+                        "timestamp",
+                    ],
+                    use_pyarrow=True,
+                )
+                .rename({"code": "static_indices", "numerical_value": "static_values"})
+                .with_columns(
+                    pl.col("static_values").list.eval(pl.element().fill_null(0)),
+                    pl.col("static_indices").list.eval(pl.element().fill_null(0)),
+                )
             )
 
             self.static_dfs[shard] = df
@@ -241,8 +248,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
                 self.subj_seq_bounds[subj] = (0, n_events)
 
         if self.has_task:
-            task_df_fp = self.config.tasks_root / f"{self.config.task_name}.parquet"
-            task_info_fp = self.config.tasks_root / f"{self.config.task_name}_info.json"
+            task_df_fp = Path(self.config.tasks_root) / f"{self.config.task_name}.parquet"
+            task_info_fp = Path(self.config.tasks_root) / f"{self.config.task_name}_info.json"
 
             logger.info(f"Reading task constraints for {self.config.task_name} from {task_df_fp}")
             task_df = pl.read_parquet(task_df_fp, use_pyarrow=True)
@@ -274,7 +281,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
                 .agg("start_time", "end_time", idx_col)
                 .join(
                     pl.concat(self.static_dfs.values()).select(
-                        "patient_id", pl.col("start_time").alias("start_time_global"), "time_delta"
+                        "patient_id", pl.col("start_time").alias("start_time_global"), "timestamp"
                     ),
                     on="patient_id",
                     how="left",
@@ -380,7 +387,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         data_for_stats = pl.concat([x.lazy() for x in self.static_dfs.values()])
         stats = (
             data_for_stats.select(
-                pl.col("time_delta").explode().drop_nulls().drop_nans().alias("inter_event_time")
+                pl.col("timestamp").list.diff().explode().drop_nulls().drop_nans().alias("inter_event_time")
             )
             .select(
                 pl.col("inter_event_time").min().alias("min"),
@@ -390,8 +397,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
             .collect()
         )
 
-        if stats["min"].item() <= 0:
-            bad_inter_event_times = data_for_stats.filter(pl.col("time_delta").list.min() <= 0).collect()
+        if stats["min"].item() <= timedelta(0):
+            bad_inter_event_times = data_for_stats.filter(pl.col("timestamp").list.diff().list.min() <= 0).collect()
             bad_patient_ids = set(bad_inter_event_times["patient_id"].to_list())
             warning_strs = [
                 f"Observed inter-event times <= 0 for {len(bad_inter_event_times)} subjects!",
@@ -399,7 +406,7 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
                 f"Global min: {stats['min'].item()}",
             ]
             if self.config.MEDS_cohort_dir is not None:
-                fp = self.config.MEDS_cohort_dir / f"malformed_data_{self.split}.parquet"
+                fp = Path(self.config.MEDS_cohort_dir) / f"malformed_data_{self.split}.parquet"
                 bad_inter_event_times.write_parquet(fp)
                 warning_strs.append(f"Wrote malformed data records to {fp}")
             warning_strs.append("Removing malformed subjects")
@@ -433,14 +440,14 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         regardless. The output will have structure:
         ``
         {
-            'time_delta': [seq_len],
+            'time_delta_days': [seq_len],
             'dynamic_indices': [seq_len, n_data_per_event] (ragged),
             'dynamic_values': [seq_len, n_data_per_event] (ragged),
             'static_indices': [seq_len, n_data_per_event] (ragged),
         }
         ``
 
-        1. ``time_delta`` captures the time between each event and the subsequent event.
+        1. ``time_delta_days`` captures the time between each event and the subsequent event in days.
         2. ``dynamic_indices`` captures the categorical metadata elements listed in `self.data_cols` in a
            unified vocabulary space spanning all metadata vocabularies.
         3. ``dynamic_values`` captures the numerical metadata elements listed in `self.data_cols`. If no
@@ -465,8 +472,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         static_row = self.static_dfs[shard][patient_idx].to_dict()
 
         out = {
-            "static_indices": static_row["code"].item().to_list(),
-            "static_values": static_row["numerical_value"].item().to_list(),
+            "static_indices": static_row["static_indices"].item().to_list(),
+            "static_values": static_row["static_values"].item().to_list(),
         }
 
         if self.config.do_include_patient_id:
@@ -494,13 +501,11 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
             out["end_idx"] = end
 
         out["dynamic"] = JointNestedRaggedTensorDict.load_slice(
-            self.config.tensorized_root / f"{shard}.nrt", patient_idx
+            Path(self.config.tensorized_root) / f"{shard}.nrt", patient_idx
         )[st:end]
 
         if self.config.do_include_start_time_min:
-            out["start_time"] = static_row["start_time"] = static_row[
-                "start_time"
-            ].item().timestamp() / 60.0 + sum(static_row["time_delta"].item().to_list()[:st])
+            out["start_time"] = static_row["timestamp"].item().to_list()[st]
 
         for t, t_labels in self.labels.items():
             out[t] = t_labels[idx]
@@ -521,6 +526,8 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
             padding_side=self.config.seq_padding_side
         )
         dynamic["event_mask"] = dynamic.pop("dim1/mask")
+        dynamic["dynamic_values"] = dynamic.pop("numerical_value")
+        dynamic["dynamic_indices"] = dynamic.pop("code")
         dynamic["dynamic_values_mask"] = dynamic.pop("dim2/mask") & ~np.isnan(dynamic["dynamic_values"])
 
         dynamic_collated = {}
@@ -539,9 +546,9 @@ class PytorchDataset(SeedableMixin, torch.utils.data.Dataset):
         out_batch = {}
         out_batch["event_mask"] = collated["event_mask"]
         out_batch["dynamic_values_mask"] = collated["dynamic_values_mask"]
-        out_batch["time_delta"] = torch.nan_to_num(collated["time_delta"].float(), nan=0)
-        out_batch["dynamic_indices"] = collated["code"].long()
-        out_batch["dynamic_values"] = torch.nan_to_num(collated["numerical_values"].float(), nan=0)
+        out_batch["time_delta_days"] = torch.nan_to_num(collated["time_delta_days"].float(), nan=0)
+        out_batch["dynamic_indices"] = collated["dynamic_indices"].long()
+        out_batch["dynamic_values"] = torch.nan_to_num(collated["dynamic_values"].float(), nan=0)
 
         if self.config.do_include_start_time_min:
             out_batch["start_time"] = collated["start_time"].float()
